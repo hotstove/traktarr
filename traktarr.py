@@ -801,6 +801,10 @@ def movie(
     default=0,
     help='Limit number of movies added to Radarr.')
 @click.option(
+    '--results-limit', '-rl', 
+    default=0, 
+    help='Limit number of results returned for Trakt lists.')
+@click.option(
     '--add-delay', '-d',
     default=2.5,
     help='Seconds between each add request to Radarr.',
@@ -871,6 +875,7 @@ def movie(
 def movies(
         list_type,
         add_limit=0,
+        results_limit=0,
         add_delay=2.5,
         sort='votes',
         rotten_tomatoes=None,
@@ -981,9 +986,32 @@ def movies(
     pvr_objects_list = get_objects(radarr, 'Radarr', notifications)
     pvr_exclusions_list = get_exclusions(radarr, 'Radarr')
 
+    #Handle limited Trakt lists
+    if list_type in trakt.non_user_lists:
+        #Rename cache depending on which list is called. 
+        if list_type == "played" or list_type == "watched":
+            cache_name = "get_most_"+list_type+"_movies.db"
+        else:
+            cache_name = "get_"+list_type+"_movies.db"
+        log.debug("Naming cache %s",cache_name)
+        if results_limit != 0:#If a limited Trakt list is called
+            log.debug("A limited Trakt list was called.")
+            #Limit cache time to one second 
+            trakt.cache_time = 1 
+            log.debug("Limiting cache time to %d",trakt.cache_time)
+            #Delete cache
+            if os.path.isfile(cache_name):
+                os.remove(cache_name)
+                log.debug("Cache exists for this list. Deleting %s",cache_name)
+        else:
+            log.debug("Unlimited list was called. Not deleting %s",cache_name)
+    else:
+        log.debug("The list called does not cache.")
+
     # get trakt movies list
     if list_type.lower() == 'anticipated':
         trakt_objects_list = trakt.get_anticipated_movies(
+            limit=results_limit,
             years=years,
             countries=countries,
             languages=languages,
@@ -993,6 +1021,7 @@ def movies(
 
     elif list_type.lower() == 'trending':
         trakt_objects_list = trakt.get_trending_movies(
+            limit=results_limit,
             years=years,
             countries=countries,
             languages=languages,
@@ -1002,6 +1031,7 @@ def movies(
 
     elif list_type.lower() == 'popular':
         trakt_objects_list = trakt.get_popular_movies(
+            limit=results_limit,
             years=years,
             countries=countries,
             languages=languages,
@@ -1018,6 +1048,7 @@ def movies(
                       " list type!")
             return None
         trakt_objects_list = trakt.get_person_movies(
+            limit=results_limit,
             years=years,
             person=person,
             countries=countries,
@@ -1030,6 +1061,7 @@ def movies(
     elif list_type.lower() == 'recommended':
         trakt_objects_list = trakt.get_recommended_movies(
             authenticate_user,
+            limit=results_limit,
             years=years,
             countries=countries,
             languages=languages,
@@ -1040,6 +1072,7 @@ def movies(
     elif list_type.lower().startswith('played'):
         most_type = misc_helper.substring_after(list_type.lower(), "_")
         trakt_objects_list = trakt.get_most_played_movies(
+            limit=results_limit,
             years=years,
             countries=countries,
             languages=languages,
@@ -1051,6 +1084,7 @@ def movies(
     elif list_type.lower().startswith('watched'):
         most_type = misc_helper.substring_after(list_type.lower(), "_")
         trakt_objects_list = trakt.get_most_watched_movies(
+            limit=results_limit,
             years=years,
             countries=countries,
             languages=languages,
@@ -1060,9 +1094,9 @@ def movies(
         )
 
     elif list_type.lower() == 'watchlist':
-        trakt_objects_list = trakt.get_watchlist_movies(authenticate_user)
+        trakt_objects_list = trakt.get_watchlist_movies(authenticate_user, limit=results_limit)
     else:
-        trakt_objects_list = trakt.get_user_list_movies(list_type, authenticate_user)
+        trakt_objects_list = trakt.get_user_list_movies(list_type, authenticate_user, limit=results_limit)
 
     if not trakt_objects_list:
         log.error("Aborting due to failure to retrieve Trakt \'%s\' movies list.", list_type.capitalize())
@@ -1120,6 +1154,7 @@ def movies(
 
     # loop movies
     log.info("Processing list now...")
+    blacklisted_movies = 0
     for sorted_movie in sorted_movies_list:
         # noinspection PyBroadException
 
@@ -1197,6 +1232,7 @@ def movies(
                         log.error("FAILED ADDING: \'%s (%s)\'", movie_title, movie_year)
                         continue
             else:
+                blacklisted_movies += 1
                 log.info("SKIPPED: \'%s (%s)\'", movie_title, movie_year)
                 continue
 
@@ -1211,6 +1247,7 @@ def movies(
             log.exception("Exception while processing movie \'%s\': ", movie_title)
 
     log.info("Added %d new movie(s) to Radarr", added_movies)
+    log.info("Removed %d movie(s) blacklisted by your configuration.",blacklisted_movies)
 
     # send notification
     if notifications and (cfg.notifications.verbose or added_movies > 0):
@@ -1449,6 +1486,18 @@ def automatic_movies(
                     '_' in list_type and list_type.lower().partition("_")[0] in Trakt.non_user_lists):
                 limit = value
 
+                if isinstance(value, dict):
+                    log.debug("Automatic config for %s contains a dictionary. Handle appropriately.",list_type)
+                    limit = value["add_limit"]
+                    if list_type == 'boxoffice':
+                        results_limit = 10
+                    else:
+                        results_limit = value["results_limit"]
+                else:
+                    log.debug("Automatic config for %s contains no dictionary.",list_type)
+                    limit = value
+                    results_limit = 0
+
                 if limit <= 0:
                     log.info("SKIPPED Trakt's \'%s\' movies list.", list_type.capitalize())
                     continue
@@ -1464,6 +1513,7 @@ def automatic_movies(
                 added_movies = movies.callback(
                     list_type=list_type,
                     add_limit=limit,
+                    results_limit=results_limit,
                     add_delay=add_delay,
                     sort=sort,
                     no_search=no_search,
@@ -1473,7 +1523,16 @@ def automatic_movies(
                 )
 
             elif list_type.lower() == 'watchlist':
-                for authenticate_user, limit in value.items():
+                for authenticate_user, v in value.items():
+                    if isinstance(v, dict):
+                        log.debug("Automatic config for %s contains a dictionary. Handle appropriately.",list_type)
+                        limit = v['add_limit']
+                        results_limit = v["results_limit"]
+                    else:
+                        log.debug("Automatic config for %s contains no dictionary.",list_type)
+                        limit = v
+                        results_limit = 0
+
                     if limit <= 0:
                         log.info("SKIPPED Trakt user \'%s\''s \'%s\'", authenticate_user, list_type.capitalize)
                         continue
@@ -1490,6 +1549,7 @@ def automatic_movies(
                     added_movies = movies.callback(
                         list_type=list_type,
                         add_limit=limit,
+                        results_limit=results_limit,
                         add_delay=add_delay,
                         sort=sort,
                         no_search=no_search,
@@ -1507,11 +1567,20 @@ def automatic_movies(
 
                 for list_, v in value.items():
                     if isinstance(v, dict):
+                        log.debug("Automatic config for %s contains a dictionary. Handle appropriately.",list_type)
                         authenticate_user = v['authenticate_user']
-                        limit = v['limit']
+                        limit = v['add_limit']
+                        results_limit = v["results_limit"]
                     else:
+                        log.debug("Automatic config for %s contains no dictionary.",list_type)
                         authenticate_user = None
                         limit = v
+                        results_limit = 0
+                    if limit <= 0:
+                        log.info("Skipped Trakt's user list: %s", list_)
+                        continue
+                    else:
+                        log.info("Adding %d movies from the Trakt list %s", limit, list_type)
 
                     if limit <= 0:
                         log.info("SKIPPED Trakt's \'%s\' movies list.", list_)
@@ -1526,6 +1595,7 @@ def automatic_movies(
                     added_movies = movies.callback(
                         list_type=list_,
                         add_limit=limit,
+                        results_limit=results_limit,
                         add_delay=add_delay,
                         sort=sort,
                         no_search=no_search,
@@ -1535,6 +1605,8 @@ def automatic_movies(
                         rotten_tomatoes=rotten_tomatoes,
                     )
 
+            if limit == 0:
+                continue
             if added_movies is None:
                 if list_type.lower() != 'lists':
                     log.info("FAILED ADDING movies from Trakt's \'%s\' list.", list_type.capitalize())

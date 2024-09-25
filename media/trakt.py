@@ -15,7 +15,9 @@ cachefile = Config().cachefile
 
 
 class Trakt:
-    non_user_lists = ['anticipated', 'trending', 'popular', 'boxoffice', 'watched', 'played']
+#   non_user_lists = ['anticipated', 'trending', 'popular', 'boxoffice', 'watched', 'played']
+    non_user_lists = ['anticipated', 'trending', 'popular', 'boxoffice', 'watched', 'played', 'recommended' ]
+    cache_time = (60 * 60 * 24) #One day in seconds
 
     def __init__(self, cfg):
         self.cfg = cfg
@@ -81,6 +83,7 @@ class Trakt:
     def _make_items_request(
             self,
             url,
+            page,
             limit,
             type_name,
             object_name,
@@ -94,6 +97,14 @@ class Trakt:
             runtimes=None,
             include_non_acting_roles=False,
     ):
+
+        #Limit pages and results per page if a results_limit was sent.
+        if limit == 0:
+            limit_results = False
+            limit = 1000
+        else:
+            limit_results = True
+            total_pages, limit = self.getPageAndResultsPerPage(limit)
 
         # default payload
         if payload is None:
@@ -161,8 +172,17 @@ class Trakt:
                     return None
 
                 current_page = payload['page']
-                total_pages = 0 if 'X-Pagination-Page-Count' not in req.headers else int(
-                    req.headers['X-Pagination-Page-Count'])
+
+                #Limit pages if results are limited.    
+                if limit_results == True and not type_name == 'boxoffice':
+                    log.debug("Limiting Trakt list results to %d.",limit)
+                else:
+                    if type_name == 'boxoffice':
+                        log.debug("Cannot limit Trakt's Box Office results. It always has 10 results.")
+                        total_pages = 1
+                    else:
+                        log.debug("Not limiting Trakt list results.")
+                        total_pages = 0 if 'X-Pagination-Page-Count' not in req.headers else int(req.headers['X-Pagination-Page-Count'])
 
                 log.debug("Response Page: %d of %d", current_page, total_pages)
 
@@ -239,6 +259,34 @@ class Trakt:
         except Exception:
             log.exception("Exception validating client_id: ")
         return False
+    
+    def getPageAndResultsPerPage(self, x):
+       # This function returns the factor that is both closest to and under 1000, and it's opposing factor.
+
+       log.debug("The factors of",x,"are:")
+
+       #Gets the factors of x
+       results_limit_factors = []
+       for i in range(1, x + 1):
+           if x % i == 0:
+               results_limit_factors.append(i)
+       log.debug(results_limit_factors)
+
+       #Remove factors greater than 1000
+       for integer in results_limit_factors:
+         if integer > 1000:
+           results_limit_factors.remove(integer)
+       results_per_page = min(results_limit_factors, key=lambda y:abs(y-x))
+
+       #Must have been a prime number over 1000. Switching results around.
+       if results_per_page == 1:
+         pages = 1
+         results_per_page = x
+       else:
+         pages = int(x / results_per_page)
+
+       log.debug(str(pages)+" pages * "+str(results_per_page)+" results per page.")
+       return pages, results_per_page
 
     def remove_recommended_item(self, item_type, trakt_id, authenticate_user=None):
         ret, ret_data = self._make_request(
@@ -663,10 +711,11 @@ class Trakt:
             object_name='movie',
         )
 
-    @cache(cache_file=cachefile, retry_if_blank=True)
+    @cache(cache_file='get_trending_movies.db', cache_time=cache_time, retry_if_blank=True)
     def get_trending_movies(
             self,
-            limit=1000,
+            page=None,
+            limit=0,
             years=None,
             countries=None,
             languages=None,
@@ -676,6 +725,7 @@ class Trakt:
 
         return self._make_items_request(
             url='https://api.trakt.tv/movies/trending',
+            page=page,
             object_name='movies',
             type_name='trending',
             limit=limit,
@@ -686,10 +736,11 @@ class Trakt:
             runtimes=runtimes,
         )
 
-    @cache(cache_file=cachefile, retry_if_blank=True)
+    @cache(cache_file='get_popular_movies.db', cache_time=cache_time, retry_if_blank=True)
     def get_popular_movies(
             self,
-            limit=1000,
+            page=None,
+            limit=0,
             years=None,
             countries=None,
             languages=None,
@@ -699,6 +750,7 @@ class Trakt:
 
         return self._make_items_request(
             url='https://api.trakt.tv/movies/popular',
+            page=page,
             object_name='movies',
             type_name='popular',
             limit=limit,
@@ -709,10 +761,11 @@ class Trakt:
             runtimes=runtimes,
         )
 
-    @cache(cache_file=cachefile, retry_if_blank=True)
+    @cache(cache_file='get_anticipated_movies.db', cache_time=cache_time, retry_if_blank=True)
     def get_anticipated_movies(
             self,
-            limit=1000,
+            page=None,
+            limit=0,
             years=None,
             countries=None,
             languages=None,
@@ -722,6 +775,7 @@ class Trakt:
 
         return self._make_items_request(
             url='https://api.trakt.tv/movies/anticipated',
+            page=page,
             object_name='movies',
             type_name='anticipated',
             limit=limit,
@@ -732,10 +786,12 @@ class Trakt:
             runtimes=runtimes,
         )
 
+ #   @cache(cache_file='get_person_movies.db', cache_time=cache_time, retry_if_blank=True)
     def get_person_movies(
             self,
             person,
-            limit=1000,
+            page=None,
+            limit=0,
             years=None,
             countries=None,
             languages=None,
@@ -746,6 +802,7 @@ class Trakt:
 
         return self._make_items_request(
             url='https://api.trakt.tv/people/%s/movies' % person.replace(' ', '-').lower(),
+            page=page,
             object_name='movies',
             type_name='person',
             limit=limit,
@@ -757,10 +814,11 @@ class Trakt:
             include_non_acting_roles=include_non_acting_roles,
         )
 
-    @cache(cache_file=cachefile, retry_if_blank=True)
+#    @cache(cache_file='get_most_played_movies.db', cache_time=cache_time, retry_if_blank=True)
     def get_most_played_movies(
             self,
-            limit=1000,
+            page=None,
+            limit=0,
             years=None,
             countries=None,
             languages=None,
@@ -771,6 +829,7 @@ class Trakt:
 
         return self._make_items_request(
             url='https://api.trakt.tv/movies/played/%s' % ('weekly' if not most_type else most_type),
+            page=page,
             object_name='movies',
             type_name='played',
             limit=limit,
@@ -781,10 +840,11 @@ class Trakt:
             runtimes=runtimes,
         )
 
-    @cache(cache_file=cachefile, retry_if_blank=True)
+#    @cache(cache_file='get_most_watched_movies.db', cache_time=cache_time, retry_if_blank=True)
     def get_most_watched_movies(
             self,
-            limit=1000,
+            page=None,
+            limit=0,
             years=None,
             countries=None,
             languages=None,
@@ -795,6 +855,7 @@ class Trakt:
 
         return self._make_items_request(
             url='https://api.trakt.tv/movies/watched/%s' % ('weekly' if not most_type else most_type),
+            page=page,
             object_name='movies',
             type_name='watched',
             limit=limit,
@@ -805,22 +866,27 @@ class Trakt:
             runtimes=runtimes,
         )
 
+    @cache(cache_file='get_boxoffice_movies.db', cache_time=cache_time, retry_if_blank=True)
     def get_boxoffice_movies(
             self,
-            limit=1000,
+            page=None,
+            limit=0,
     ):
 
         return self._make_items_request(
             url='https://api.trakt.tv/movies/boxoffice',
+            page=page,
             object_name='movies',
-            type_name='anticipated',
+            type_name='boxoffice',
             limit=limit,
         )
 
+    @cache(cache_file='get_recommended_movies.db', cache_time=cache_time, retry_if_blank=True)
     def get_recommended_movies(
             self,
             authenticate_user=None,
-            limit=1000,
+            page=None,
+            limit=0,
             years=None,
             countries=None,
             languages=None,
@@ -832,6 +898,7 @@ class Trakt:
             url='https://api.trakt.tv/recommendations/movies',
             object_name='movies',
             type_name='recommended from {authenticate_user}',
+            page=page,
             authenticate_user=authenticate_user,
             limit=limit,
             years=years,
@@ -844,7 +911,8 @@ class Trakt:
     def get_watchlist_movies(
             self,
             authenticate_user=None,
-            limit=1000,
+            page=None,
+            limit=0,
             years=None,
             countries=None,
             languages=None,
@@ -854,6 +922,7 @@ class Trakt:
 
         return self._make_items_request(
             url='https://api.trakt.tv/users/{authenticate_user}/watchlist/movies',
+            page=page,
             object_name='movies',
             type_name='watchlist from {authenticate_user}',
             authenticate_user=authenticate_user,
@@ -869,7 +938,8 @@ class Trakt:
             self,
             list_url,
             authenticate_user=None,
-            limit=1000,
+            page=None,
+            limit=0,
             years=None,
             countries=None,
             languages=None,
@@ -883,6 +953,7 @@ class Trakt:
 
         return self._make_items_request(
             url='https://api.trakt.tv/users/' + list_user + '/lists/' + list_key + '/items/movies',
+            page=page,
             object_name='movies',
             type_name=(list_key + ' from ' + list_user),
             authenticate_user=authenticate_user,
